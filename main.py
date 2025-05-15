@@ -12,6 +12,8 @@ from reportlab.lib.pagesizes import LETTER
 
 app = FastAPI()
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 class Documento(BaseModel):
     ordem: int
     secao: str
