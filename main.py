@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List
 import requests
@@ -32,18 +32,18 @@ def create_text_page(text, font_size=18):
     return PdfReader(packet)
 
 def download_pdf(url):
-try:
-headers = {
-"User-Agent": "Mozilla/5.0",
-"Accept": "application/pdf"
-}
-r = requests.get(url, headers=headers)
-r.raise_for_status()
-if b"%PDF" not in r.content[:1024]:
-raise Exception("Arquivo baixado não parece ser um PDF.")
-return PdfReader(io.BytesIO(r.content))
-except Exception as e:
-raise Exception(f"Erro ao baixar ou carregar PDF da URL: {url}\n{str(e)}")
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/pdf"
+        }
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        if b"%PDF" not in r.content[:1024]:
+            raise Exception("Arquivo baixado não parece ser um PDF.")
+        return PdfReader(io.BytesIO(r.content))
+    except Exception as e:
+        raise Exception(f"Erro ao baixar ou carregar PDF da URL: {url}\n{str(e)}")
 
 def generate_index(exhibits):
     packet = io.BytesIO()
@@ -103,7 +103,6 @@ async def merge_docs(request: Request):
             merger.append(pdf)
             page_counter += num_pages
 
-        # Gera índice
         merger.merge(0, generate_index(exhibit_list))
 
         os.makedirs("static", exist_ok=True)
