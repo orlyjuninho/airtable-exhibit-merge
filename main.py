@@ -7,12 +7,13 @@ import requests
 import io
 import os
 import uuid
-from PyPDF2 import PdfMerger, PdfReader
+from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.colors import blue
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 app = FastAPI()
-
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 class Documento(BaseModel):
@@ -27,12 +28,33 @@ class Payload(BaseModel):
 def create_text_page(text, font_size=18):
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=LETTER)
-    can.setFont("Helvetica-Bold", font_size)
     width, height = LETTER
+    can.setFont("Helvetica-Bold", font_size)
     can.drawCentredString(width / 2.0, height / 2.0, text)
     can.save()
     packet.seek(0)
     return PdfReader(packet)
+
+def add_page_numbers(reader: PdfReader, start_at=1):
+    writer = PdfWriter()
+    total_pages = len(reader.pages)
+    for i in range(total_pages):
+        page = reader.pages[i]
+        packet = io.BytesIO()
+        can = canvas.Canvas(packet, pagesize=LETTER)
+        width, height = LETTER
+        can.setFont("Helvetica", 12)
+        can.setFillColor(blue)
+        can.drawRightString(width - 40, 20, str(start_at + i))
+        can.save()
+        packet.seek(0)
+        overlay = PdfReader(packet)
+        page.merge_page(overlay.pages[0])
+        writer.add_page(page)
+    output = io.BytesIO()
+    writer.write(output)
+    output.seek(0)
+    return PdfReader(output)
 
 def download_pdf(url):
     try:
@@ -51,21 +73,47 @@ def download_pdf(url):
 def generate_index(exhibits):
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=LETTER)
-    can.setFont("Helvetica-Bold", 16)
-    can.drawString(100, 750, "Exhibit List")
-    can.setFont("Helvetica", 12)
-    y = 720
+    width, height = LETTER
+    left_margin = 70
+    right_margin = width - 50
+    max_text_width = right_margin - left_margin - 80  # espaço reservado para a página
+
+    can.setFont("Helvetica-Bold", 18)
+    can.drawCentredString(width / 2.0, height - 60, "Exhibit List")
+
+    y = height - 90
     for item, page in exhibits:
-        if page:
-            can.drawString(100, y, f"{item} .......... {page}")
+        if page is None:
+            can.setFont("Helvetica-Bold", 12)
+            can.drawString(left_margin, y, item)
+            can.drawRightString(right_margin, y, "1")
+            y -= 20
         else:
-            can.setFont("Helvetica-Bold", 13)
-            can.drawString(100, y, f"{item}")
             can.setFont("Helvetica", 12)
-        y -= 20
-        if y < 50:
-            can.showPage()
-            y = 750
+            line = item
+            words = line.split()
+            current_line = ""
+            lines = []
+
+            for word in words:
+                test_line = f"{current_line} {word}".strip()
+                line_width = stringWidth(test_line, "Helvetica", 12)
+                if line_width < max_text_width:
+                    current_line = test_line
+                else:
+                    lines.append(current_line)
+                    current_line = word
+            lines.append(current_line)
+
+            for i, line in enumerate(lines):
+                can.drawString(left_margin, y, line)
+                if i == len(lines) - 1:
+                    can.drawRightString(right_margin, y, page)
+                y -= 20
+                if y < 50:
+                    can.showPage()
+                    y = height - 60
+
     can.save()
     packet.seek(0)
     return PdfReader(packet)
@@ -81,6 +129,7 @@ async def merge_docs(request: Request):
         exhibit_list = []
         current_section = None
         page_counter = 1
+        temp_outputs = []
 
         for doc in documentos:
             print(f"🔗 Baixando PDF: {doc['pdf_url']}")
@@ -88,25 +137,30 @@ async def merge_docs(request: Request):
             num_pages = len(pdf.pages)
 
             if doc["ordem"] == 0:
-                merger.append(pdf)
+                numbered = add_page_numbers(pdf, page_counter)
+                temp_outputs.append((numbered, num_pages))
+                page_counter += num_pages
                 continue
 
             if doc["secao"] != current_section:
                 current_section = doc["secao"]
                 cover = create_text_page(current_section)
-                merger.append(cover)
+                cover_numbered = add_page_numbers(cover, page_counter)
+                temp_outputs.append((cover_numbered, 1))
+                exhibit_list.append((current_section, str(page_counter)))
                 page_counter += 1
-                exhibit_list.append((current_section, None))
 
-            start = page_counter
-            end = start + num_pages - 1
-            page_info = f"{start}-{end}" if start != end else str(start)
-            exhibit_list.append((doc["titulo"], page_info))
-
-            merger.append(pdf)
+            page_range = f"{page_counter}-{page_counter + num_pages - 1}" if num_pages > 1 else str(page_counter)
+            exhibit_list.append((doc["titulo"], page_range))
+            numbered_pdf = add_page_numbers(pdf, page_counter)
+            temp_outputs.append((numbered_pdf, num_pages))
             page_counter += num_pages
 
-        merger.merge(0, generate_index(exhibit_list))
+        index_pdf = generate_index(exhibit_list)
+        temp_outputs.insert(0, (index_pdf, len(index_pdf.pages)))
+
+        for pdf, _ in temp_outputs:
+            merger.append(pdf)
 
         os.makedirs("static", exist_ok=True)
         filename = f"static/{uuid.uuid4().hex}.pdf"
