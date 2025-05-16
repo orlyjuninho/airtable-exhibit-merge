@@ -7,6 +7,7 @@ import requests
 import io
 import os
 import uuid
+import re
 from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER
@@ -24,6 +25,10 @@ class Documento(BaseModel):
 
 class Payload(BaseModel):
     documentos: List[Documento]
+
+def extract_num(text):
+    match = re.match(r"(\d+)", text)
+    return int(match.group(1)) if match else 9999
 
 def create_text_page(text, font_size=18):
     packet = io.BytesIO()
@@ -45,7 +50,7 @@ def add_page_numbers(reader: PdfReader, start_at=1):
         width, height = LETTER
         can.setFont("Helvetica", 12)
         can.setFillColor(blue)
-        can.drawRightString(width - 40, 20, str(start_at + i))
+        can.drawRightString(width - 30, 10, str(start_at + i))
         can.save()
         packet.seek(0)
         overlay = PdfReader(packet)
@@ -76,7 +81,7 @@ def generate_index(exhibits):
     width, height = LETTER
     left_margin = 70
     right_margin = width - 50
-    max_text_width = right_margin - left_margin - 80  # espaço reservado para a página
+    max_text_width = right_margin - left_margin - 80
 
     can.setFont("Helvetica-Bold", 18)
     can.drawCentredString(width / 2.0, height - 60, "Exhibit List")
@@ -87,14 +92,12 @@ def generate_index(exhibits):
             can.setFont("Helvetica-Bold", 12)
             can.drawString(left_margin, y, item)
             can.drawRightString(right_margin, y, "1")
-            y -= 20
+            y -= 30
         else:
             can.setFont("Helvetica", 12)
-            line = item
-            words = line.split()
+            words = item.split()
             current_line = ""
             lines = []
-
             for word in words:
                 test_line = f"{current_line} {word}".strip()
                 line_width = stringWidth(test_line, "Helvetica", 12)
@@ -124,7 +127,11 @@ async def merge_docs(request: Request):
         data = await request.json()
         print("📥 Dados recebidos:", data)
 
-        documentos = sorted(data["documentos"], key=lambda x: x["ordem"])
+        documentos = sorted(
+            data["documentos"],
+            key=lambda x: (extract_num(x["secao"]), extract_num(x["titulo"]))
+        )
+
         merger = PdfMerger()
         exhibit_list = []
         current_section = None
