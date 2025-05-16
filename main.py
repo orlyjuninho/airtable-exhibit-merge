@@ -7,7 +7,6 @@ import requests
 import io
 import os
 import uuid
-import re
 from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER
@@ -46,8 +45,7 @@ def add_page_numbers(reader: PdfReader, start_at=1):
         width, height = LETTER
         can.setFont("Helvetica", 12)
         can.setFillColor(blue)
-        # Ajuste: paginação mais para baixo e direita
-        can.drawRightString(width - 30, 15, str(start_at + i))
+        can.drawRightString(width - 50, 25, str(start_at + i))
         can.save()
         packet.seek(0)
         overlay = PdfReader(packet)
@@ -60,10 +58,7 @@ def add_page_numbers(reader: PdfReader, start_at=1):
 
 def download_pdf(url):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/pdf"
-        }
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/pdf"}
         r = requests.get(url, headers=headers)
         r.raise_for_status()
         if b"%PDF" not in r.content[:1024]:
@@ -72,10 +67,10 @@ def download_pdf(url):
     except Exception as e:
         raise Exception(f"Erro ao baixar ou carregar PDF da URL: {url}\n{str(e)}")
 
-def extract_exhibit_number(section_title):
-    """Extrai o número do Exhibit do título para ordenação."""
-    match = re.search(r'Exhibit\s+(\d+)', section_title)
-    return int(match.group(1)) if match else 9999  # números não encontrados vão para o fim
+def extract_exhibit_number(section):
+    import re
+    match = re.search(r'Exhibit (\d+)', section)
+    return int(match.group(1)) if match else 9999
 
 def generate_index(exhibits):
     packet = io.BytesIO()
@@ -89,64 +84,34 @@ def generate_index(exhibits):
     can.drawCentredString(width / 2.0, height - 60, "Exhibit List")
 
     y = height - 90
-    last_section = None
-
-    # Mapear se o item é seção Exhibit e criar dicionário para ordenação
-    section_order = {}
-    for item, page in exhibits:
-        if item.lower().startswith("exhibit") and item not in section_order:
-            section_order[item] = extract_exhibit_number(item)
-    # Construir lista ordenada por número do Exhibit
-    current_order = 0
-    sorted_exhibits = []
-    for item, page in exhibits:
-        if item in section_order:
-            current_order = section_order[item]
-        sorted_exhibits.append((current_order, item, page))
-    sorted_exhibits.sort()
-
-    for idx, (exhibit_num, item, page) in enumerate(sorted_exhibits):
-        is_section = item in section_order
-
-        # Espaço extra antes de um novo Exhibit, exceto no primeiro
-        if is_section and last_section is not None:
-            y -= 10
-
-        # Quebra de página se espaço insuficiente
-        if y < 50:
-            can.showPage()
-            y = height - 60
-
+    for item, page, is_section in exhibits:
         if is_section:
+            y -= 10
             can.setFont("Helvetica-Bold", 12)
-            can.drawString(left_margin, y, item)
-            can.drawRightString(right_margin, y, page)
-            y -= 20
-            last_section = item
         else:
             can.setFont("Helvetica", 12)
-            words = item.split()
-            current_line = ""
-            lines = []
 
-            for word in words:
-                test_line = f"{current_line} {word}".strip()
-                line_width = stringWidth(test_line, "Helvetica", 12)
-                if line_width < max_text_width:
-                    current_line = test_line
-                else:
-                    lines.append(current_line)
-                    current_line = word
-            lines.append(current_line)
+        words = item.split()
+        current_line = ""
+        lines = []
 
-            for i, line in enumerate(lines):
-                can.drawString(left_margin, y, line)
-                if i == len(lines) - 1:
-                    can.drawRightString(right_margin, y, page)
-                y -= 20
-                if y < 50:
-                    can.showPage()
-                    y = height - 60
+        for word in words:
+            test_line = f"{current_line} {word}".strip()
+            if stringWidth(test_line, "Helvetica-Bold" if is_section else "Helvetica", 12) < max_text_width:
+                current_line = test_line
+            else:
+                lines.append(current_line)
+                current_line = word
+        lines.append(current_line)
+
+        for i, line in enumerate(lines):
+            can.drawString(left_margin, y, line)
+            if i == len(lines) - 1:
+                can.drawRightString(right_margin, y, page)
+            y -= 20
+            if y < 50:
+                can.showPage()
+                y = height - 60
 
     can.save()
     packet.seek(0)
@@ -156,9 +121,8 @@ def generate_index(exhibits):
 async def merge_docs(request: Request):
     try:
         data = await request.json()
-        print("📥 Dados recebidos:", data)
+        documentos = sorted(data["documentos"], key=lambda x: (extract_exhibit_number(x["secao"]), x["ordem"]))
 
-        documentos = sorted(data["documentos"], key=lambda x: x["ordem"])
         merger = PdfMerger()
         exhibit_list = []
         current_section = None
@@ -170,22 +134,16 @@ async def merge_docs(request: Request):
             pdf = download_pdf(doc["pdf_url"])
             num_pages = len(pdf.pages)
 
-            if doc["ordem"] == 0:
-                numbered = add_page_numbers(pdf, page_counter)
-                temp_outputs.append((numbered, num_pages))
-                page_counter += num_pages
-                continue
-
             if doc["secao"] != current_section:
                 current_section = doc["secao"]
                 cover = create_text_page(current_section)
                 cover_numbered = add_page_numbers(cover, page_counter)
                 temp_outputs.append((cover_numbered, 1))
-                exhibit_list.append((current_section, str(page_counter)))
+                exhibit_list.append((current_section, str(page_counter), True))
                 page_counter += 1
 
             page_range = f"{page_counter}-{page_counter + num_pages - 1}" if num_pages > 1 else str(page_counter)
-            exhibit_list.append((doc["titulo"], page_range))
+            exhibit_list.append((doc["titulo"], page_range, False))
             numbered_pdf = add_page_numbers(pdf, page_counter)
             temp_outputs.append((numbered_pdf, num_pages))
             page_counter += num_pages
@@ -205,7 +163,6 @@ async def merge_docs(request: Request):
         url = f"https://{host}/{filename}"
         print("✅ PDF gerado:", url)
         return JSONResponse({"download_url": url})
-
     except Exception as e:
         print("❌ Erro no processamento:", str(e))
         return JSONResponse(status_code=500, content={"error": str(e)})
