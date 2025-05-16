@@ -12,6 +12,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.colors import blue
 from reportlab.pdfbase.pdfmetrics import stringWidth
+import re
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -24,6 +25,14 @@ class Documento(BaseModel):
 
 class Payload(BaseModel):
     documentos: List[Documento]
+
+def extract_section_number(section: str):
+    match = re.search(r"Exhibit\s*(\d+)", section)
+    return int(match.group(1)) if match else 9999
+
+def extract_title_number(title: str):
+    match = re.match(r"\s*(\d+)", title)
+    return int(match.group(1)) if match else 9999
 
 def create_text_page(text, font_size=18):
     packet = io.BytesIO()
@@ -45,7 +54,7 @@ def add_page_numbers(reader: PdfReader, start_at=1):
         width, height = LETTER
         can.setFont("Helvetica", 12)
         can.setFillColor(blue)
-        can.drawRightString(width - 50, 25, str(start_at + i))
+        can.drawRightString(width - 30, 15, str(start_at + i))
         can.save()
         packet.seek(0)
         overlay = PdfReader(packet)
@@ -58,7 +67,10 @@ def add_page_numbers(reader: PdfReader, start_at=1):
 
 def download_pdf(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/pdf"}
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/pdf"
+        }
         r = requests.get(url, headers=headers)
         r.raise_for_status()
         if b"%PDF" not in r.content[:1024]:
@@ -66,11 +78,6 @@ def download_pdf(url):
         return PdfReader(io.BytesIO(r.content))
     except Exception as e:
         raise Exception(f"Erro ao baixar ou carregar PDF da URL: {url}\n{str(e)}")
-
-def extract_exhibit_number(section):
-    import re
-    match = re.search(r'Exhibit (\d+)', section)
-    return int(match.group(1)) if match else 9999
 
 def generate_index(exhibits):
     packet = io.BytesIO()
@@ -97,7 +104,8 @@ def generate_index(exhibits):
 
         for word in words:
             test_line = f"{current_line} {word}".strip()
-            if stringWidth(test_line, "Helvetica-Bold" if is_section else "Helvetica", 12) < max_text_width:
+            line_width = stringWidth(test_line, can._fontname, can._fontsize)
+            if line_width < max_text_width:
                 current_line = test_line
             else:
                 lines.append(current_line)
@@ -121,32 +129,41 @@ def generate_index(exhibits):
 async def merge_docs(request: Request):
     try:
         data = await request.json()
-        documentos = sorted(data["documentos"], key=lambda x: (extract_exhibit_number(x["secao"]), x["ordem"]))
+        print("📥 Dados recebidos:", data)
 
+        documentos = data["documentos"]
+
+        grouped = {}
+        for doc in documentos:
+            sec = doc["secao"]
+            if sec not in grouped:
+                grouped[sec] = []
+            grouped[sec].append(doc)
+
+        sorted_sections = sorted(grouped.items(), key=lambda x: extract_section_number(x[0]))
         merger = PdfMerger()
         exhibit_list = []
-        current_section = None
-        page_counter = 1
         temp_outputs = []
+        page_counter = 1
 
-        for doc in documentos:
-            print(f"🔗 Baixando PDF: {doc['pdf_url']}")
-            pdf = download_pdf(doc["pdf_url"])
-            num_pages = len(pdf.pages)
+        for sec, docs in sorted_sections:
+            cover = create_text_page(sec)
+            cover_numbered = add_page_numbers(cover, page_counter)
+            temp_outputs.append((cover_numbered, 1))
+            exhibit_list.append((sec, str(page_counter), True))
+            page_counter += 1
 
-            if doc["secao"] != current_section:
-                current_section = doc["secao"]
-                cover = create_text_page(current_section)
-                cover_numbered = add_page_numbers(cover, page_counter)
-                temp_outputs.append((cover_numbered, 1))
-                exhibit_list.append((current_section, str(page_counter), True))
-                page_counter += 1
+            sorted_docs = sorted(docs, key=lambda d: extract_title_number(d["titulo"]))
 
-            page_range = f"{page_counter}-{page_counter + num_pages - 1}" if num_pages > 1 else str(page_counter)
-            exhibit_list.append((doc["titulo"], page_range, False))
-            numbered_pdf = add_page_numbers(pdf, page_counter)
-            temp_outputs.append((numbered_pdf, num_pages))
-            page_counter += num_pages
+            for doc in sorted_docs:
+                print(f"🔗 Baixando PDF: {doc['pdf_url']}")
+                pdf = download_pdf(doc["pdf_url"])
+                num_pages = len(pdf.pages)
+                page_range = f"{page_counter}-{page_counter + num_pages - 1}" if num_pages > 1 else str(page_counter)
+                exhibit_list.append((doc["titulo"], page_range, False))
+                numbered = add_page_numbers(pdf, page_counter)
+                temp_outputs.append((numbered, num_pages))
+                page_counter += num_pages
 
         index_pdf = generate_index(exhibit_list)
         temp_outputs.insert(0, (index_pdf, len(index_pdf.pages)))
@@ -163,6 +180,7 @@ async def merge_docs(request: Request):
         url = f"https://{host}/{filename}"
         print("✅ PDF gerado:", url)
         return JSONResponse({"download_url": url})
+
     except Exception as e:
         print("❌ Erro no processamento:", str(e))
         return JSONResponse(status_code=500, content={"error": str(e)})
